@@ -1,0 +1,11 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+/app/build
+/build
+# Downloaded at build time by the fetchScrcpyServer Gradle task (official
+# scrcpy-server release binary, pinned to v3.3.4).
+/app/src/main/assets/scrcpy-server
+# The wrapper jar is a binary; CI provisions Gradle via setup-gradle.
+/gradle/wrapper/gradle-wrapper.jar

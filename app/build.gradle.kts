@@ -27,8 +27,54 @@ val fetchScrcpyServer by tasks.registering {
 }
 tasks.named("preBuild").configure { dependsOn(fetchScrcpyServer) }
 
+// The launcher icon is the user's own original image, byte for byte.
+// It cannot be stored as a binary in the repo (the GitHub integration
+// only pushes text files), so it lives here as base64 and this task
+// decodes it into generated resources at build time. The xxxhdpi copy
+// is the original 192x192 file exactly as sent; smaller densities are
+// plain downscales of the same artwork, never a redraw.
+val launcherIconFile = file("icon-original.b64")
+val launcherIconResDir = layout.buildDirectory.dir("generated/launcherIconRes")
+val installLauncherIcon by tasks.registering {
+    description = "Decodes the original launcher icon into generated resources."
+    outputs.dir(launcherIconResDir)
+    doLast {
+        val outDir = launcherIconResDir.get().asFile
+        val bytes = java.util.Base64.getDecoder().decode(launcherIconFile.readText().trim())
+        val densities = mapOf(
+            "mipmap-xxxhdpi" to 192, "mipmap-xxhdpi" to 144,
+            "mipmap-xhdpi" to 96, "mipmap-hdpi" to 72, "mipmap-mdpi" to 48
+        )
+        densities.forEach { (dir, size) ->
+            val d = outDir.resolve(dir).apply { mkdirs() }
+            if (size == 192) {
+                d.resolve("ic_launcher.png").writeBytes(bytes)
+                d.resolve("ic_launcher_round.png").writeBytes(bytes)
+            } else {
+                val img = javax.imageio.ImageIO.read(bytes.inputStream())
+                val scaled = java.awt.image.BufferedImage(size, size, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+                val g = scaled.createGraphics()
+                g.drawImage(img.getScaledInstance(size, size, java.awt.Image.SCALE_SMOOTH), 0, 0, null)
+                g.dispose()
+                listOf("ic_launcher.png", "ic_launcher_round.png").forEach { name ->
+                    javax.imageio.ImageIO.write(scaled, "png", d.resolve(name))
+                }
+            }
+        }
+    }
+}
+tasks.named("preBuild").configure { dependsOn(installLauncherIcon) }
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Resources") }
+    .configureEach { dependsOn(installLauncherIcon) }
+
 android {
     namespace = "app.scrcpy"
+
+    sourceSets {
+        named("main") {
+            res.srcDirs("src/main/res", "build/generated/launcherIconRes")
+        }
+    }
     compileSdk = 34
 
     defaultConfig {

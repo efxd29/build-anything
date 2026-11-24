@@ -90,6 +90,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val crash = app.scrcpy.CrashReporter.pendingCrash(this)
+        if (crash != null) {
+            showCrashReport(crash)
+            return
+        }
         enableEdgeToEdge()
         val filter = IntentFilter(ACTION_USB_PERMISSION)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -132,6 +137,48 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+
+    /** Plain framework views on purpose: this screen must work even if the
+     *  Compose stack itself is what crashed. */
+    private fun showCrashReport(trace: String) {
+        val scroll = android.widget.ScrollView(this)
+        val column = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(40, 48, 40, 40)
+        }
+        val title = android.widget.TextView(this).apply {
+            text = "Scrcpy crashed last time it opened"
+            textSize = 19f
+            setPadding(0, 0, 0, 16)
+        }
+        val body = android.widget.TextView(this).apply {
+            text = trace
+            textSize = 12f
+            setTextIsSelectable(true)
+        }
+        val copyBtn = android.widget.Button(this).apply {
+            text = "Copy report"
+            setOnClickListener {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("Scrcpy crash", trace))
+                android.widget.Toast.makeText(this@MainActivity, "Copied", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+        val clearBtn = android.widget.Button(this).apply {
+            text = "Clear and open Scrcpy"
+            setOnClickListener {
+                app.scrcpy.CrashReporter.clear(this@MainActivity)
+                recreate()
+            }
+        }
+        column.addView(title)
+        column.addView(copyBtn)
+        column.addView(clearBtn)
+        column.addView(body)
+        scroll.addView(column)
+        setContentView(scroll)
     }
 
     override fun onNewIntent(intent: Intent) {

@@ -1,4 +1,7 @@
+import java.awt.Image
+import java.awt.image.BufferedImage
 import java.net.URI
+import java.util.Base64
 
 plugins {
     alias(libs.plugins.android.application)
@@ -40,7 +43,7 @@ val installLauncherIcon by tasks.registering {
     outputs.dir(launcherIconResDir)
     doLast {
         val outDir = launcherIconResDir.get().asFile
-        val bytes = java.util.Base64.getDecoder().decode(launcherIconFile.readText().trim())
+        val bytes = Base64.getDecoder().decode(launcherIconFile.readText().trim())
         val densities = mapOf(
             "mipmap-xxxhdpi" to 192, "mipmap-xxhdpi" to 144,
             "mipmap-xhdpi" to 96, "mipmap-hdpi" to 72, "mipmap-mdpi" to 48
@@ -52,9 +55,9 @@ val installLauncherIcon by tasks.registering {
                 d.resolve("ic_launcher_round.png").writeBytes(bytes)
             } else {
                 val img = javax.imageio.ImageIO.read(bytes.inputStream())
-                val scaled = java.awt.image.BufferedImage(size, size, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+                val scaled = BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
                 val g = scaled.createGraphics()
-                g.drawImage(img.getScaledInstance(size, size, java.awt.Image.SCALE_SMOOTH), 0, 0, null)
+                g.drawImage(img.getScaledInstance(size, size, Image.SCALE_SMOOTH), 0, 0, null)
                 g.dispose()
                 listOf("ic_launcher.png", "ic_launcher_round.png").forEach { name ->
                     javax.imageio.ImageIO.write(scaled, "png", d.resolve(name))

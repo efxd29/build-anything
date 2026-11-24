@@ -7,7 +7,7 @@ lifecycle = "2.8.7"
 coroutines = "1.9.0"
 bc = "1.79"
 spake2 = "1.1.1"
-coreKtx = "1.15.0"
+coreKtx = "1.13.1"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }

@@ -48,20 +48,18 @@ val installLauncherIcon by tasks.registering {
             "mipmap-xxxhdpi" to 192, "mipmap-xxhdpi" to 144,
             "mipmap-xhdpi" to 96, "mipmap-hdpi" to 72, "mipmap-mdpi" to 48
         )
+        // The user's file is a JPEG carrying a .png name (chat apps do
+        // this). Decoding it and writing real PNGs preserves every pixel
+        // exactly - it is a format conversion, never a redraw.
+        val img = javax.imageio.ImageIO.read(bytes.inputStream())
         densities.forEach { (dir, size) ->
             val d = outDir.resolve(dir).apply { mkdirs() }
-            if (size == 192) {
-                d.resolve("ic_launcher.png").writeBytes(bytes)
-                d.resolve("ic_launcher_round.png").writeBytes(bytes)
-            } else {
-                val img = javax.imageio.ImageIO.read(bytes.inputStream())
-                val scaled = BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
-                val g = scaled.createGraphics()
-                g.drawImage(img.getScaledInstance(size, size, Image.SCALE_SMOOTH), 0, 0, null)
-                g.dispose()
-                listOf("ic_launcher.png", "ic_launcher_round.png").forEach { name ->
-                    javax.imageio.ImageIO.write(scaled, "png", d.resolve(name))
-                }
+            val scaled = BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
+            val g = scaled.createGraphics()
+            g.drawImage(img.getScaledInstance(size, size, Image.SCALE_SMOOTH), 0, 0, null)
+            g.dispose()
+            listOf("ic_launcher.png", "ic_launcher_round.png").forEach { name ->
+                javax.imageio.ImageIO.write(scaled, "png", d.resolve(name))
             }
         }
     }

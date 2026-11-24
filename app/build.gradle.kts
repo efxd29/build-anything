@@ -30,12 +30,13 @@ val fetchScrcpyServer by tasks.registering {
 }
 tasks.named("preBuild").configure { dependsOn(fetchScrcpyServer) }
 
-// The launcher icon is the user's own original image, byte for byte.
+// The launcher icon is the user's own original image, pixel for pixel.
 // It cannot be stored as a binary in the repo (the GitHub integration
 // only pushes text files), so it lives here as base64 and this task
-// decodes it into generated resources at build time. The xxxhdpi copy
-// is the original 192x192 file exactly as sent; smaller densities are
-// plain downscales of the same artwork, never a redraw.
+// decodes it into generated resources at build time. The sent file is
+// a JPEG with a .png name, so the task converts the container format
+// to real PNG; every density is a plain downscale of the same artwork,
+// never a redraw or a recolor.
 val launcherIconFile = file("icon-original.b64")
 val launcherIconResDir = layout.buildDirectory.dir("generated/launcherIconRes")
 val installLauncherIcon by tasks.registering {

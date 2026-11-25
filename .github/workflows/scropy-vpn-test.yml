@@ -21,6 +21,11 @@ jobs:
     timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
       - name: Run emulator VPN test
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -29,6 +34,7 @@ jobs:
           arch: x86_64
           profile: pixel_6
           disable-animations: true
+          emulator-boot-timeout: 900
           emulator-options: -no-window -no-snapshot -no-audio -gpu swiftshader_indirect
           script: bash emu-test/run-vpn-test.sh "${{ inputs.scropy_apk_url }}" "${{ inputs.scropy_apk_sha256 }}"
       - name: Upload test evidence

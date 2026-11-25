@@ -190,8 +190,8 @@ fi
 adb root >/dev/null 2>&1
 adb wait-for-device
 pass "adb reconnected on localhost:5555, tcp port=$(adb shell getprop service.adb.tcp.port 2>/dev/null | tr -d '\r')"
-GUEST_IP=$(adb shell ip -o addr show eth0 2>/dev/null | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
-[[ -z "$GUEST_IP" ]] && GUEST_IP=$(adb shell ip -o addr show wlan0 2>/dev/null | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
+GUEST_IP=$(adb shell ip -o addr show eth0 2>/dev/null | grep -o 'inet [0-9.]*' | head -1 | cut -d' ' -f2)
+[[ -z "$GUEST_IP" ]] && GUEST_IP=$(adb shell ip -o addr show wlan0 2>/dev/null | grep -o 'inet [0-9.]*' | head -1 | cut -d' ' -f2)
 log "guest IP: $GUEST_IP"
 [[ -z "$GUEST_IP" ]] && GUEST_IP="10.0.2.15" && note "guest IP parse failed, assuming 10.0.2.15"
 
@@ -280,7 +280,12 @@ if [[ "$MIRROR" == "0" ]]; then
   adb shell am force-stop tech.devline.scropy_ui
   sleep 2
   dismiss_anr
-  adb shell am start -n tech.devline.scropy_ui/.StreamActivity --es host "$GUEST_IP" --ei port 5555 >/dev/null 2>&1
+  RETRY_IP="$GUEST_IP"
+  if [[ "$RETRY_IP" != "10.0.2.15" ]]; then
+    RETRY_IP="10.0.2.15"
+    note "rig retry uses fallback host $RETRY_IP (first attempt's $GUEST_IP never connected)"
+  fi
+  adb shell am start -n tech.devline.scropy_ui/.StreamActivity --es host "$RETRY_IP" --ei port 5555 >/dev/null 2>&1
   sleep 8
   for i in 1 2 3; do
     if try_tap_text "Allow"; then sleep 5; break; fi
@@ -345,15 +350,21 @@ if [[ "$VPN_IMPORTED" == "1" ]]; then
   sleep 3
   observe 60 vpn-off
 else
-  # Fallback trigger: wifi off/on breaks the socket path too (different code
-  # path than VPN, but still exercises the watchdog's recovery).
-  note "FALLBACK: toggling guest wifi off/on instead of VPN"
-  adb shell svc wifi disable
+  # Trigger: airplane mode on/off — a total network teardown (harsher than
+  # a VPN toggle) and deterministic from root shell. The WireGuard UI stage
+  # keeps failing on this guest (launcher ANRs), so this is the trigger for
+  # the watchdog's recovery path.
+  note "TRIGGER: airplane mode ON (network teardown)"
+  adb shell settings put global airplane_mode_on 1
+  adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true >/dev/null 2>&1
   sleep 3
-  observe 60 wifi-off
-  adb shell svc wifi enable
-  sleep 5
-  observe 60 wifi-back
+  log "airplane_mode_on=$(adb shell settings get global airplane_mode_on 2>/dev/null | tr -d '\r')"
+  observe 60 airplane-on
+  note "TRIGGER: airplane mode OFF (network returns)"
+  adb shell settings put global airplane_mode_on 0
+  adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false >/dev/null 2>&1
+  sleep 8
+  observe 90 airplane-off
 fi
 
 # ---------- 9. collect evidence + verdict ----------

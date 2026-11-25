@@ -1,0 +1,40 @@
+# Scropy VPN freeze self-test — runs on GitHub-hosted Ubuntu (KVM) because
+# the local VM has no /dev/kvm and TCG emulation boots too slowly to test.
+# The APK under test is NOT stored in this repo: it is fetched at runtime
+# from a URL passed as a workflow input (upload the build, dispatch, run).
+name: Scropy VPN freeze test
+
+on:
+  workflow_dispatch:
+    inputs:
+      scropy_apk_url:
+        description: 'Direct URL of the Scropy APK under test'
+        required: true
+      scropy_apk_sha256:
+        description: 'Expected SHA-256 of the APK (empty = skip check)'
+        required: false
+        default: '71c5d52c0aa4b5f9d8f438f8632efbc2fd62b8a09598fbe3eac18388492e4b2a'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run emulator VPN test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -no-snapshot -no-audio -gpu swiftshader_indirect
+          script: bash emu-test/run-vpn-test.sh "${{ inputs.scropy_apk_url }}" "${{ inputs.scropy_apk_sha256 }}"
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scropy-vpn-evidence
+          path: emu-test/evidence/
+          if-no-files-found: warn

@@ -4,6 +4,10 @@
 # Writes all evidence to emu-test/evidence/ (uploaded as a workflow artifact).
 # Design: never `set -e` — every stage logs PASS/FAIL/BLOCKED and the run
 # continues so a failure in one stage still leaves evidence for the rest.
+# Run #3 changes vs #2: official WireGuard app replaces v2rayNG (its import
+# never surfaced); a continuous swipe loop keeps real frame flow + control
+# traffic alive during observation (run #2's static screen produced ~0 fps,
+# which made frame deltas meaningless and starved the watchdog's inputs).
 set -u
 APK_URL="${1:-}"
 EXPECTED_SHA="${2:-}"
@@ -21,7 +25,7 @@ note() { log "NOTE: $*"; }
 shot() { # shot <name>
   adb exec-out screencap -p > "$EVID/$1.png" 2>/dev/null || log "shot $1 failed"
 }
-uidump() { # uidump <name> — writes $EVID/<name>.xml, echoes path
+uidump() { # uidump <name> — writes $EVID/<name>.xml
   adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1
   adb pull /sdcard/ui.xml "$EVID/$1.xml" >/dev/null 2>&1
 }
@@ -61,6 +65,35 @@ try_tap_text() { # try_tap_text <needle> — returns 0 if tapped
   tap_at $out
   return 0
 }
+# tap_switch — tap centre of the first Switch node in the current UI
+tap_switch() {
+  local dump="$EVID/ui-last.xml"
+  uidump ui-last
+  local out
+  out=$(python3 - "$dump" <<'PYEOF'
+import sys, re, xml.etree.ElementTree as ET
+try:
+    tree = ET.parse(sys.argv[1])
+except Exception as e:
+    print("DUMP_PARSE_FAIL", e); sys.exit(1)
+for node in tree.iter("node"):
+    if (node.get("class") or "").endswith("Switch"):
+        m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.get("bounds") or "")
+        if m:
+            x1, y1, x2, y2 = map(int, m.groups())
+            print(f"{(x1+x2)//2} {(y1+y2)//2}")
+            sys.exit(0)
+print("NOT_FOUND")
+sys.exit(1)
+PYEOF
+  ) || { log "tap_switch: $out"; return 1; }
+  if [[ "$out" == "DUMP_PARSE_FAIL"* || "$out" == "NOT_FOUND" ]]; then
+    log "tap_switch: $out"; return 1
+  fi
+  log "tap_switch -> tapping $out"
+  tap_at $out
+  return 0
+}
 wd() { # wd — print watchdog.txt (needs adb root)
   adb shell cat /sdcard/Android/data/tech.devline.scropy_ui/files/watchdog.txt 2>/dev/null \
     || echo "(watchdog.txt unreadable/missing)"
@@ -74,11 +107,27 @@ top_activity() {
   adb shell dumpsys activity activities 2>/dev/null \
     | grep -m1 "topResumedActivity" | sed 's/^ *//'
 }
-vpn_up() { # 0 if tun0 exists
-  adb shell ip addr show tun0 2>/dev/null | grep -q "inet "
+vpn_up() { # 0 if the WireGuard tunnel interface exists (named after tunnel)
+  adb shell ip -o link show 2>/dev/null | grep -qE "test-vpn|tun0"
+}
+# swipe loop: continuous touch input on the controller view -> the mirrored
+# screen keeps changing (real frame flow) and ControlSender stays active
+# (lastControl fresh), exactly like a user actively using the mirror.
+SWIPE_PID=""
+start_swipes() {
+  ( for i in $(seq 1 90); do
+      adb shell input swipe 540 1300 540 500 250 >/dev/null 2>&1
+      sleep 2
+    done ) &
+  SWIPE_PID=$!
+  log "swipe loop started (pid $SWIPE_PID)"
+}
+stop_swipes() {
+  [[ -n "$SWIPE_PID" ]] && kill "$SWIPE_PID" 2>/dev/null
+  SWIPE_PID=""
 }
 
-log "=== Scropy VPN-freeze test started $(date) ==="
+log "=== Scropy VPN-freeze test (run3: WireGuard + swipes) started $(date) ==="
 log "APK_URL=$APK_URL"
 
 # ---------- 1. device ready ----------
@@ -97,12 +146,12 @@ if [[ -n "$EXPECTED_SHA" && "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
   echo "SHA_MISMATCH" > "$OLDPWD/$EVID/VERDICT.md"
   exit 1
 fi
-V2RAY_URL="https://github.com/2dust/v2rayNG/releases/download/2.3.15/v2rayNG_2.3.15_x86_64.apk"
-curl -sL -o v2ray.apk "$V2RAY_URL" || fail "v2rayNG download failed"
-log "v2ray.apk size=$(stat -c%s v2ray.apk)"
+WG_URL="https://download.wireguard.com/android-client/com.wireguard.android-1.0.20260315.apk"
+curl -sL -o wg.apk "$WG_URL" || fail "wireguard download failed"
+log "wg.apk size=$(stat -c%s wg.apk)"
 adb install -r scropy.apk || fail "scropy install failed"
-adb install -r v2ray.apk || fail "v2rayNG install failed"
-adb shell pm list packages | grep -E "scropy_ui|v2ray" || fail "packages not listed after install"
+adb install -r wg.apk || fail "wireguard install failed"
+adb shell pm list packages | grep -E "scropy_ui|wireguard" || fail "packages not listed after install"
 pass "both APKs installed"
 cd "$OLDPWD"
 
@@ -133,31 +182,44 @@ GUEST_IP=$(adb shell ip -o addr show eth0 2>/dev/null | grep -o 'inet [0-9.]*' |
 log "guest IP: $GUEST_IP"
 [[ -z "$GUEST_IP" ]] && GUEST_IP="10.0.2.15" && note "guest IP parse failed, assuming 10.0.2.15"
 
-# ---------- 5. import VPN profile into v2rayNG ----------
+# ---------- 5. import VPN profile into WireGuard ----------
 VPN_IMPORTED=0
-adb shell am start -a android.intent.action.VIEW -d file:///sdcard/test-vpn.conf -t text/plain -n com.v2ray.ang/.ui.MainActivity >/dev/null 2>&1
+# Path A: VIEW intent (WireGuard registers an importer for .conf files)
+adb shell am start -a android.intent.action.VIEW -d file:///sdcard/test-vpn.conf -t text/plain >/dev/null 2>&1
 sleep 5
-shot vpn-import-intent
-uidump vpn-import-intent
-if grep -qi "203.0.113.1\|test-vpn\|WireGuard\|wireguard" "$EVID/vpn-import-intent.xml" 2>/dev/null; then
+shot wg-import-intent
+uidump wg-import-intent
+if grep -qi "test-vpn" "$EVID/wg-import-intent.xml" 2>/dev/null; then
+  # an import dialog shows the tunnel name + an Import button
+  try_tap_text "Import" && sleep 3
+fi
+adb shell am start -n com.wireguard.android/.activity.MainActivity >/dev/null 2>&1
+sleep 4
+uidump wg-list-a
+if grep -q "test-vpn" "$EVID/wg-list-a.xml" 2>/dev/null; then
   VPN_IMPORTED=1; pass "VPN profile imported via VIEW intent"
 else
-  note "VIEW intent did not show the profile — trying manual import flow"
-  adb shell am start -n com.v2ray.ang/.ui.MainActivity >/dev/null 2>&1
-  sleep 4
-  # v2rayNG main screen: tap the + (add) button, then "Import config from file"
-  try_tap_text "add" || try_tap_text "Add" || try_tap_text "+"
+  note "VIEW intent path did not import — trying in-app import flow"
+  # Path B: + button -> "Import from file or archive" -> picker -> file
+  try_tap_text "Add" || try_tap_text "add"
   sleep 2
-  shot vpn-import-menu
-  if try_tap_text "Import config from file"; then
+  shot wg-import-menu
+  if try_tap_text "Import from file"; then
     sleep 3
-    shot vpn-import-picker
-    # DocumentsUI file picker: show the file by name if visible
-    try_tap_text "test-vpn.conf" && sleep 3
+    shot wg-import-picker
+    uidump wg-import-picker
+    # DocumentsUI: the file sits at the root of internal storage
+    try_tap_text "test-vpn.conf" || try_tap_text "test-vpn"
+    sleep 3
+    shot wg-import-after-pick
+    # import confirmation dialog, if any
+    try_tap_text "Import" && sleep 2
   fi
-  uidump vpn-import-manual
-  if grep -qi "203.0.113.1\|test-vpn\|WireGuard\|wireguard" "$EVID/vpn-import-manual.xml" 2>/dev/null; then
-    VPN_IMPORTED=1; pass "VPN profile imported via manual flow"
+  adb shell am start -n com.wireguard.android/.activity.MainActivity >/dev/null 2>&1
+  sleep 3
+  uidump wg-list-b
+  if grep -q "test-vpn" "$EVID/wg-list-b.xml" 2>/dev/null; then
+    VPN_IMPORTED=1; pass "VPN profile imported via in-app flow"
   else
     fail "VPN profile import FAILED both ways — VPN toggle stage BLOCKED (will fall back to wifi toggle)"
   fi
@@ -172,6 +234,7 @@ for i in 1 2 3; do
   if try_tap_text "Allow"; then sleep 5; break; fi
   sleep 4
 done
+start_swipes
 # wait for mirror: StreamActivity resumed + frames advancing
 MIRROR=0
 for i in $(seq 1 12); do
@@ -212,29 +275,28 @@ observe() { # observe <seconds> <label>
   shot "observe-$label"
 }
 if [[ "$VPN_IMPORTED" == "1" ]]; then
-  adb shell am start -n com.v2ray.ang/.ui.MainActivity >/dev/null 2>&1
+  adb shell am start -n com.wireguard.android/.activity.MainActivity >/dev/null 2>&1
   sleep 4
-  # start the service: tap the start FAB (content-desc varies) — try candidates
-  try_tap_text "Start" || try_tap_text "start" || try_tap_text "Connect" || note "no Start button matched by text"
-  sleep 4
+  tap_switch || note "no Switch node found for tunnel toggle"
+  sleep 3
   # VpnService consent dialog ("OK")
   try_tap_text "OK" && sleep 3
   for i in $(seq 1 6); do
-    if vpn_up; then pass "VPN ON — tun0 up after ~$((i*5))s"; break; fi
+    if vpn_up; then pass "VPN ON — tunnel interface up after ~$((i*5))s"; break; fi
     sleep 5
   done
-  vpn_up && log "VPN confirmed UP" || fail "VPN did NOT come up (tun0 missing) — observe stage still runs"
+  vpn_up && log "VPN confirmed UP" || fail "VPN did NOT come up (tunnel interface missing) — observe stage still runs"
   shot vpn-on
   # bring Scropy back to front WITHOUT creating a second instance
   adb shell am start -f 0x20000000 -n tech.devline.scropy_ui/.StreamActivity >/dev/null 2>&1
   sleep 3
   observe 90 vpn-on
   # ---------- 8. VPN OFF + observe recovery ----------
-  adb shell am start -n com.v2ray.ang/.ui.MainActivity >/dev/null 2>&1
+  adb shell am start -n com.wireguard.android/.activity.MainActivity >/dev/null 2>&1
   sleep 4
-  try_tap_text "Stop" || try_tap_text "stop" || try_tap_text "Disconnect" || note "no Stop button matched by text"
+  tap_switch || note "no Switch node found for tunnel stop"
   sleep 5
-  vpn_up && fail "VPN still up after stop tap" || pass "VPN OFF — tun0 gone"
+  vpn_up && fail "VPN still up after toggle off" || pass "VPN OFF — tunnel interface gone"
   adb shell am start -f 0x20000000 -n tech.devline.scropy_ui/.StreamActivity >/dev/null 2>&1
   sleep 3
   observe 60 vpn-off
@@ -251,6 +313,7 @@ else
 fi
 
 # ---------- 9. collect evidence + verdict ----------
+stop_swipes
 adb logcat -d > "$EVID/logcat-full.txt" 2>/dev/null
 wd > "$EVID/watchdog-final.txt" || true
 shot final

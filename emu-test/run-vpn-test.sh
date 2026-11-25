@@ -252,7 +252,7 @@ done
 start_swipes
 # wait for mirror: StreamActivity resumed + frames advancing
 MIRROR=0
-for i in $(seq 1 12); do
+for i in $(seq 1 24); do
   TOP=$(top_activity)
   log "tick $i top: $TOP"
   if echo "$TOP" | grep -q "StreamActivity"; then
@@ -307,6 +307,12 @@ if [[ "$MIRROR" == "0" ]]; then
   [[ "$MIRROR" == "1" ]] && pass "MIRROR ESTABLISHED after rig retry" || fail "mirror still NOT established after rig retry"
 fi
 log "--- watchdog.txt at mirror stage ---"; wd | tee "$EVID/watchdog-mirror.txt"
+if [[ "$MIRROR" == "1" ]] && ! grep -qE "TICK state=[4-7]" "$EVID/watchdog-mirror.txt"; then
+  # gfxinfo also advances when the watchdog keeps recreating the activity —
+  # only the watchdog's own state bits prove a session ever connected.
+  MIRROR=0
+  fail "mirror claim rejected: frames advanced but watchdog never saw a connected session (relaunch churn, not video)"
+fi
 
 # ---------- 7. VPN ON + observe ----------
 observe() { # observe <seconds> <label>

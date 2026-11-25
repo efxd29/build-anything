@@ -94,6 +94,14 @@ PYEOF
   tap_at $out
   return 0
 }
+dismiss_anr() { # tap "Wait" if an ANR dialog ("isn't responding") is showing
+  uidump ui-anr
+  if grep -qi "isn't responding" "$EVID/ui-anr.xml" 2>/dev/null; then
+    note "ANR dialog present — tapping Wait"
+    try_tap_text "Wait"
+    sleep 2
+  fi
+}
 wd() { # wd — print watchdog.txt (needs adb root)
   adb shell cat /sdcard/Android/data/tech.devline.scropy_ui/files/watchdog.txt 2>/dev/null \
     || echo "(watchdog.txt unreadable/missing)"
@@ -153,6 +161,10 @@ adb install -r scropy.apk || fail "scropy install failed"
 adb install -r wg.apk || fail "wireguard install failed"
 adb shell pm list packages | grep -E "scropy_ui|wireguard" || fail "packages not listed after install"
 pass "both APKs installed"
+# settle: let dexopt / first-boot churn finish before any UI automation
+# (run #3 lost its WireGuard stage to a Pixel Launcher ANR)
+sleep 20
+dismiss_anr
 cd "$OLDPWD"
 
 # ---------- 3. push VPN profile ----------
@@ -179,11 +191,13 @@ adb root >/dev/null 2>&1
 adb wait-for-device
 pass "adb reconnected on localhost:5555, tcp port=$(adb shell getprop service.adb.tcp.port 2>/dev/null | tr -d '\r')"
 GUEST_IP=$(adb shell ip -o addr show eth0 2>/dev/null | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
+[[ -z "$GUEST_IP" ]] && GUEST_IP=$(adb shell ip -o addr show wlan0 2>/dev/null | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
 log "guest IP: $GUEST_IP"
 [[ -z "$GUEST_IP" ]] && GUEST_IP="10.0.2.15" && note "guest IP parse failed, assuming 10.0.2.15"
 
 # ---------- 5. import VPN profile into WireGuard ----------
 VPN_IMPORTED=0
+dismiss_anr
 # Path A: VIEW intent (WireGuard registers an importer for .conf files)
 adb shell am start -a android.intent.action.VIEW -d file:///sdcard/test-vpn.conf -t text/plain >/dev/null 2>&1
 sleep 5
@@ -226,6 +240,7 @@ else
 fi
 
 # ---------- 6. launch Scropy, connect to guest's own adbd ----------
+dismiss_anr
 adb shell am start -n tech.devline.scropy_ui/.StreamActivity --es host "$GUEST_IP" --ei port 5555 >/dev/null 2>&1
 sleep 8
 shot scropy-launch
@@ -256,6 +271,35 @@ else
   fail "mirror NOT established (StreamActivity not rendering / no frame advance)"
   log "--- watchdog.txt ---"; wd | tee "$EVID/watchdog-before-vpn.txt"
   log "--- logcat (scropy) ---"; adb logcat -d 2>/dev/null | grep -i "scropy" | tail -30 | tee "$EVID/logcat-nomirror.txt"
+fi
+if [[ "$MIRROR" == "0" ]]; then
+  # Rig-side retry (run #3's first connect died under guest load). The
+  # watchdog.txt snapshot above already recorded the app's own behaviour
+  # before this retry, so app self-recovery stays distinguishable.
+  note "rig retry: force-stop + relaunch Scropy once"
+  adb shell am force-stop tech.devline.scropy_ui
+  sleep 2
+  dismiss_anr
+  adb shell am start -n tech.devline.scropy_ui/.StreamActivity --es host "$GUEST_IP" --ei port 5555 >/dev/null 2>&1
+  sleep 8
+  for i in 1 2 3; do
+    if try_tap_text "Allow"; then sleep 5; break; fi
+    sleep 4
+  done
+  for i in $(seq 1 12); do
+    TOP=$(top_activity)
+    log "retry tick $i top: $TOP"
+    if echo "$TOP" | grep -q "StreamActivity"; then
+      F1=$(frames_rendered); sleep 5; F2=$(frames_rendered)
+      log "frames rendered: $F1 -> $F2"
+      if [[ "$F1" != "-1" && "$F2" != "-1" && "$F2" -gt "$F1" ]]; then
+        MIRROR=1; break
+      fi
+    fi
+    sleep 5
+  done
+  shot scropy-mirror-retry
+  [[ "$MIRROR" == "1" ]] && pass "MIRROR ESTABLISHED after rig retry" || fail "mirror still NOT established after rig retry"
 fi
 log "--- watchdog.txt at mirror stage ---"; wd | tee "$EVID/watchdog-mirror.txt"
 

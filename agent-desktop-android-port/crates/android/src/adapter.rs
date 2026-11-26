@@ -6,7 +6,7 @@
 use agent_desktop_core::{
     AccessibilityNode, ActionOps, AdapterError, AppInfo, Deadline, ElementState, ImageBuffer,
     InputOps, InteractionLease, LocatorField, NativeHandle, ObservationOps, ObservationRequest,
-    ObservationRoot, ObservedTree, PermissionReport, PermissionState, ProcessId, Rect, RefEntry,
+    ObservationRoot, ObservedTree, PermissionReport, PermissionState, Rect, RefEntry,
     SnapshotSurface, SystemOps, WindowFilter, WindowInfo,
     actions::action_request::ActionRequest, actions::action_result::ActionResult,
     LiveElement, LocatorStats, LocatorTraversalStats, ObservationSource,
@@ -76,7 +76,7 @@ impl Default for AndroidAdapter {
 impl ObservationOps for AndroidAdapter {
     fn focused_app(&self, _deadline: Deadline) -> Result<Option<AppInfo>, AdapterError> {
         match self.bridge().get_tree() {
-            Ok(tree) => Ok(Some(crate::system::app_info(&tree.root))),
+            Ok(tree) => Ok(Some(crate::system::app_info(&tree))),
             Err(BridgeError::Remote { code, .. }) if code == "no_active_window" => Ok(None),
             Err(error) => Err(error.into_adapter_error()),
         }
@@ -125,7 +125,7 @@ impl ObservationOps for AndroidAdapter {
             .bridge()
             .get_tree()
             .map_err(|error| error.into_adapter_error())?;
-        let window = crate::system::window_info(&tree.root);
+        let window = crate::system::window_info(&tree);
         if let Some(app) = filter.app.as_deref()
             && !window.app.eq_ignore_ascii_case(app)
         {
@@ -147,7 +147,7 @@ impl ObservationOps for AndroidAdapter {
                 } else {
                     app.label
                 },
-                pid: ProcessId::new(0),
+                pid: crate::system::synthetic_pid(&app.package),
                 bundle_id: Some(app.package),
                 process_instance: None,
                 presentation: Some(agent_desktop_core::AppPresentation::Foreground),
@@ -321,7 +321,7 @@ impl SystemOps for AndroidAdapter {
         _deadline: Deadline,
     ) -> Result<Option<WindowInfo>, AdapterError> {
         match self.bridge().get_tree() {
-            Ok(tree) => Ok(Some(crate::system::window_info(&tree.root))),
+            Ok(tree) => Ok(Some(crate::system::window_info(&tree))),
             Err(BridgeError::Remote { code, .. }) if code == "no_active_window" => Ok(None),
             Err(error) => Err(error.into_adapter_error()),
         }

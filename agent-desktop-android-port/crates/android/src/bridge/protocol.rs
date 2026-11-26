@@ -39,11 +39,16 @@ pub struct BridgeStatus {
 }
 
 /// The `result` of a `get_tree` call: the serialised active window plus the
-/// flag the bridge sets when its node or depth cap cut the walk short.
+/// flag the bridge sets when its node or depth cap cut the walk short. The
+/// bridge also reports the process-instance token it minted for the root
+/// package's current presence epoch; see `crate::system` for how the token
+/// is produced and what it can and cannot prove.
 #[derive(Debug, Clone, Deserialize)]
 pub struct BridgeTree {
     pub root: BridgeNode,
     pub truncated: bool,
+    #[serde(default)]
+    pub process_instance: String,
 }
 
 /// One node of the tree the bridge app serialises for `get_tree`.

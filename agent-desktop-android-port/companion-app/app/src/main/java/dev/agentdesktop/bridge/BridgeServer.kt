@@ -8,6 +8,7 @@ import android.graphics.Bitmap
 import android.net.LocalServerSocket
 import android.net.LocalSocket
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Base64
 import android.view.Display
@@ -59,9 +60,19 @@ object BridgeServer {
     @Volatile
     private var service: AgentAccessibilityService? = null
 
+    private val instanceLock = Object()
+    private var serviceSession = ""
+    private var epochCounter = 0L
+    private val packageEpochs = mutableMapOf<String, Long>()
+
     fun start(accessibilityService: AgentAccessibilityService) {
         service = accessibilityService
         appContext = accessibilityService.applicationContext
+        synchronized(instanceLock) {
+            serviceSession = SystemClock.elapsedRealtime().toString()
+            epochCounter = 0L
+            packageEpochs.clear()
+        }
         if (running) return
         running = true
         worker = Thread({ acceptLoop() }, "agent-desktop-bridge").apply { isDaemon = true }
@@ -73,6 +84,9 @@ object BridgeServer {
     fun stop() {
         running = false
         service = null
+        synchronized(instanceLock) {
+            packageEpochs.clear()
+        }
         try {
             serverSocket?.close()
         } catch (ignored: Exception) {
@@ -213,9 +227,71 @@ object BridgeServer {
             "no active window is available"
         )
         try {
-            return BridgeTree.serialize(root)
+            val result = BridgeTree.serialize(root)
+            result.put(
+                "process_instance",
+                processInstance(active, root.packageName?.toString() ?: "")
+            )
+            return result
         } finally {
             root.recycle()
+        }
+    }
+
+    /**
+     * The process-instance token for one package: "<service session>:<epoch>".
+     *
+     * Android gives an accessibility service no way to read another app's
+     * pid or start time, so this token is the bridge's own observation of
+     * app continuity, not an OS process identity. The session part is the
+     * bridge service's start time on the monotonic clock, so every token
+     * rotates when the service restarts. The epoch part is minted for a
+     * package the first time it is observed and kept while the package
+     * owns at least one window in the service's window list; when the
+     * package leaves the window list entirely (its process gone, its
+     * windows destroyed) the epoch is dropped, and a later return mints a
+     * fresh one. Focus switches between apps do not rotate the token,
+     * because a backgrounded app keeps its windows. Presence is sampled
+     * at observation time: a kill and relaunch that both happen between
+     * two observations, with the package never observed absent, keeps the
+     * old token.
+     */
+    private fun processInstance(
+        active: AgentAccessibilityService,
+        activePackage: String
+    ): String {
+        val present = mutableSetOf<String>()
+        if (activePackage.isNotEmpty()) {
+            present.add(activePackage)
+        }
+        try {
+            for (window in active.windows) {
+                val windowRoot = try {
+                    window.root
+                } catch (error: Exception) {
+                    null
+                } ?: continue
+                try {
+                    val pkg = windowRoot.packageName?.toString() ?: ""
+                    if (pkg.isNotEmpty()) {
+                        present.add(pkg)
+                    }
+                } finally {
+                    windowRoot.recycle()
+                }
+            }
+        } catch (error: Exception) {
+            // Presence falls back to the active package alone.
+        }
+        synchronized(instanceLock) {
+            val iterator = packageEpochs.keys.iterator()
+            while (iterator.hasNext()) {
+                if (iterator.next() !in present) {
+                    iterator.remove()
+                }
+            }
+            val epoch = packageEpochs.getOrPut(activePackage) { ++epochCounter }
+            return "$serviceSession:$epoch"
         }
     }
 

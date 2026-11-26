@@ -8,12 +8,48 @@ use agent_desktop_core::{
     system::launch_result::LaunchResult,
 };
 
-use crate::bridge::{BridgeNode, SharedBridge};
+use crate::bridge::{BridgeTree, SharedBridge};
 use crate::tree::bounds_for;
+
+/// The band synthetic pids occupy: at or above 2^30. Android's pid_max
+/// stays below 2^22, so no real process id can collide with one.
+const SYNTHETIC_PID_BASE: u32 = 0x4000_0000;
+
+/// The process id this adapter reports for one package. Android gives an
+/// accessibility service no way to read another app's real pid:
+/// AccessibilityNodeInfo and AccessibilityWindowInfo carry none,
+/// ActivityManager has shown only the caller's own process since API 22,
+/// and SELinux keeps other apps' /proc entries unreadable. This is
+/// therefore a SYNTHETIC id, not the app's pid: an FNV-1a hash of the
+/// package name folded into the band above. It is stable for a package
+/// across observations, differs between packages, and is only ever
+/// compared for equality inside ref and window identity, the same use
+/// core makes of a real pid on the desktop platforms.
+pub(crate) fn synthetic_pid(package: &str) -> ProcessId {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in package.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    ProcessId::new(SYNTHETIC_PID_BASE | (hash & 0x3fff_ffff))
+}
+
+/// The process-instance token for one observation: the presence-epoch
+/// token the bridge minted for the root package (see BridgeServer). An
+/// empty report means an old bridge that sends none, and maps to no
+/// instance rather than an invented one.
+pub(crate) fn process_instance(tree: &BridgeTree) -> Option<String> {
+    if tree.process_instance.is_empty() {
+        None
+    } else {
+        Some(tree.process_instance.clone())
+    }
+}
 
 /// The single window Android presents: the active window of the foreground
 /// application, identified by its package.
-pub(crate) fn window_info(root: &BridgeNode) -> WindowInfo {
+pub(crate) fn window_info(tree: &BridgeTree) -> WindowInfo {
+    let root = &tree.root;
     let package = if root.package.is_empty() {
         "unknown".to_owned()
     } else {
@@ -22,9 +58,9 @@ pub(crate) fn window_info(root: &BridgeNode) -> WindowInfo {
     WindowInfo {
         id: format!("android:{package}"),
         title: package.clone(),
-        app: package,
-        pid: ProcessId::new(0),
-        process_instance: None,
+        app: package.clone(),
+        pid: synthetic_pid(&package),
+        process_instance: process_instance(tree),
         bounds: Some(bounds_for(root)),
         state: WindowState {
             is_focused: true,
@@ -36,16 +72,17 @@ pub(crate) fn window_info(root: &BridgeNode) -> WindowInfo {
 }
 
 /// The foreground application a window root belongs to.
-pub(crate) fn app_info(root: &BridgeNode) -> AppInfo {
+pub(crate) fn app_info(tree: &BridgeTree) -> AppInfo {
+    let root = &tree.root;
     AppInfo {
         name: root.package.clone(),
-        pid: ProcessId::new(0),
+        pid: synthetic_pid(&root.package),
         bundle_id: if root.package.is_empty() {
             None
         } else {
             Some(root.package.clone())
         },
-        process_instance: None,
+        process_instance: process_instance(tree),
         presentation: Some(AppPresentation::Foreground),
     }
 }
@@ -67,8 +104,8 @@ pub(crate) fn launch_app(
         ));
     }
     Ok(LaunchResult {
-        app: package,
-        pid: ProcessId::new(0),
+        app: package.clone(),
+        pid: synthetic_pid(&package),
         process_instance: None,
         window: None,
         cdp: None,
@@ -122,3 +159,7 @@ fn decode_base64(payload: &str) -> Result<Vec<u8>, AdapterError> {
                 .with_platform_detail(error.to_string())
         })
 }
+
+#[cfg(test)]
+#[path = "system_tests.rs"]
+mod tests;

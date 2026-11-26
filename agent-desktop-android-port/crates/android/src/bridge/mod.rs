@@ -15,8 +15,12 @@ use serde_json::{Value, json};
 
 pub use errors::BridgeError;
 pub use protocol::{
-    BridgeActResult, BridgeApp, BridgeNode, BridgeProof, BridgeScreenshot, BridgeStatus, BridgeTree,
+    BridgeActResult, BridgeApp, BridgeNode, BridgeProof, BridgeScreenshot, BridgeStatus,
+    BridgeTree,
 };
+
+#[cfg(test)]
+pub use protocol::BridgeNodeState;
 
 use connection::{BridgeConnection, DEFAULT_TIMEOUT};
 

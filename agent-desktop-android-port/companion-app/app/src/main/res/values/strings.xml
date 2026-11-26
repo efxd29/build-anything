@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">Lets the agent-desktop command line tool on this device read the screen UI tree and perform actions you ask it to perform. No data leaves the device.</string>
+</resources>

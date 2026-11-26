@@ -24,9 +24,9 @@ impl FileLock {
         let Ok(file) = crate::storage::private_file::open_private_lock(path, false) else {
             return false;
         };
-        match file.try_lock() {
+        match try_lock(&file) {
             Ok(()) => {
-                let _ = file.unlock();
+                unlock(&file);
                 false
             }
             Err(std::fs::TryLockError::WouldBlock) => true,
@@ -102,7 +102,7 @@ fn lock_file(
         if deadline.is_expired() {
             return Err(lock_timeout(deadline, purpose, path, contention_count));
         }
-        match file.try_lock() {
+        match try_lock(&file) {
             Ok(()) => {
                 if deadline.is_expired() {
                     return Err(lock_timeout(deadline, purpose, path, contention_count));
@@ -130,6 +130,73 @@ fn lock_file(
         }
     }
 }
+
+/// Tries the std lock first and falls back to a direct `flock` only when std
+/// reports the platform unsupported: std file locking is not implemented for
+/// every unix target (Android among them) while its libc still provides
+/// `flock`. Where std locking works the fallback is never reached, so the
+/// behavior there is unchanged. Release stays by close, exactly as with the
+/// std lock: `flock` is tied to the open file description, so the last close
+/// releases it, and a duplicated descriptor shares it the same way.
+fn try_lock(file: &File) -> Result<(), std::fs::TryLockError> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(error) => try_lock_fallback(file, error),
+    }
+}
+
+#[cfg(unix)]
+fn try_lock_fallback(
+    file: &File,
+    error: std::fs::TryLockError,
+) -> Result<(), std::fs::TryLockError> {
+    let unsupported = matches!(
+        &error,
+        std::fs::TryLockError::Error(io_error)
+            if io_error.kind() == std::io::ErrorKind::Unsupported
+    );
+    if !unsupported {
+        return Err(error);
+    }
+    use std::os::fd::AsRawFd;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        return Ok(());
+    }
+    let os_error = std::io::Error::last_os_error();
+    if os_error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        Err(std::fs::TryLockError::WouldBlock)
+    } else {
+        Err(std::fs::TryLockError::Error(os_error))
+    }
+}
+
+#[cfg(not(unix))]
+fn try_lock_fallback(
+    _file: &File,
+    error: std::fs::TryLockError,
+) -> Result<(), std::fs::TryLockError> {
+    Err(error)
+}
+
+/// Releases a lock taken through [`try_lock`]: the std unlock where std
+/// locking works, the matching `flock` unlock where it does not. On unix
+/// the std lock is itself `flock`, so the fallback unlock is the same
+/// operation whenever the std unlock reports an error.
+fn unlock(file: &File) {
+    if file.unlock().is_err() {
+        unlock_fallback(file);
+    }
+}
+
+#[cfg(unix)]
+fn unlock_fallback(file: &File) {
+    use std::os::fd::AsRawFd;
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+}
+
+#[cfg(not(unix))]
+fn unlock_fallback(_file: &File) {}
 
 fn lock_timeout(
     deadline: Deadline,

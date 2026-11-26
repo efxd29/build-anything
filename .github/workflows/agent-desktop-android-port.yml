@@ -31,6 +31,17 @@ jobs:
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang
           CC_aarch64_linux_android: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang
         run: cargo check -p agent-desktop-android --target aarch64-linux-android
+      - name: Build the Termux CLI binary for the Android target
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang
+          CC_aarch64_linux_android: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang
+        run: cargo build -p agent-desktop --target aarch64-linux-android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-desktop-cli-aarch64
+          path: agent-desktop-android-port/target/aarch64-linux-android/debug/agent-desktop
+          if-no-files-found: error
 
   android-port-apk:
     name: agent-desktop-android-port companion APK
@@ -49,6 +60,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
+      - name: Restore the fixed debug keystore
+        run: base64 -d agent-desktop-android-port/companion-app/debug.keystore.b64 > agent-desktop-android-port/companion-app/debug.keystore
       - name: Build the companion bridge app (debug)
         run: gradle -p agent-desktop-android-port/companion-app assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4

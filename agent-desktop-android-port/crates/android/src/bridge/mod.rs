@@ -12,7 +12,9 @@ use std::sync::Mutex;
 use serde_json::{Value, json};
 
 pub use errors::BridgeError;
-pub use protocol::{BridgeNode, BridgeStatus};
+pub use protocol::{
+    BridgeActResult, BridgeApp, BridgeNode, BridgeProof, BridgeScreenshot, BridgeStatus, BridgeTree,
+};
 
 use connection::{BridgeConnection, DEFAULT_TIMEOUT};
 
@@ -58,9 +60,80 @@ impl SharedBridge {
         }
     }
 
+    /// Sends one request on the cached connection without reconnecting or
+    /// retrying, for calls whose effect must never be delivered twice.
+    pub fn call_once(&self, method: &str, params: Value) -> Result<Value, BridgeError> {
+        let mut guard = match self.connection.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.is_none() {
+            *guard = Some(connect_with_hello()?);
+        }
+        match guard.as_mut() {
+            Some(connection) => connection.call(method, params),
+            None => Err(BridgeError::Unavailable(
+                "bridge connection was not established".to_owned(),
+            )),
+        }
+    }
+
     /// Answers whether the bridge app answers and what it reports.
     pub fn ping(&self) -> Result<BridgeStatus, BridgeError> {
         let value = self.call("ping", json!({}))?;
+        serde_json::from_value(value)
+            .map_err(|error| BridgeError::Protocol(error.to_string()))
+    }
+
+    /// Reads the active window's accessibility tree from the bridge app.
+    pub fn get_tree(&self) -> Result<BridgeTree, BridgeError> {
+        let value = self.call("get_tree", json!({}))?;
+        serde_json::from_value(value)
+            .map_err(|error| BridgeError::Protocol(error.to_string()))
+    }
+
+    /// Asks the bridge app to re-match a capture proof against the live
+    /// tree and perform the action on the single match, in one request.
+    pub fn act_on_match(
+        &self,
+        proof: &BridgeProof,
+        action: &str,
+        arguments: Value,
+    ) -> Result<BridgeActResult, BridgeError> {
+        let params = json!({
+            "proof": serde_json::to_value(proof)
+                .map_err(|error| BridgeError::Protocol(error.to_string()))?,
+            "action": action,
+            "arguments": arguments,
+        });
+        let value = self.call_once("act", params)?;
+        serde_json::from_value(value)
+            .map_err(|error| BridgeError::Protocol(error.to_string()))
+    }
+
+    /// Lists the launchable applications the bridge app can see.
+    pub fn list_apps(&self) -> Result<Vec<BridgeApp>, BridgeError> {
+        let value = self.call("list_apps", json!({}))?;
+        let apps = value
+            .get("apps")
+            .cloned()
+            .ok_or_else(|| BridgeError::Protocol("list_apps result has no apps".to_owned()))?;
+        serde_json::from_value(apps)
+            .map_err(|error| BridgeError::Protocol(error.to_string()))
+    }
+
+    /// Launches an application by package name through the bridge app.
+    pub fn launch_app(&self, package: &str) -> Result<bool, BridgeError> {
+        let value = self.call_once("launch_app", json!({ "package": package }))?;
+        Ok(value
+            .get("launched")
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
+    }
+
+    /// Captures the display through the bridge app's screenshot facility.
+    pub fn screenshot(&self) -> Result<BridgeScreenshot, BridgeError> {
+        let value = self.call("screenshot", json!({}))?;
         serde_json::from_value(value)
             .map_err(|error| BridgeError::Protocol(error.to_string()))
     }

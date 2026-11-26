@@ -15,6 +15,8 @@ pub enum BridgeError {
     TokenRejected,
     #[error("bridge call timed out")]
     Timeout,
+    #[error("bridge returned {code}: {message}")]
+    Remote { code: String, message: String },
 }
 
 impl BridgeError {
@@ -41,6 +43,32 @@ impl BridgeError {
                 AdapterError::new(ErrorCode::Internal, "Bridge protocol error")
                     .with_platform_detail(detail)
             }
+            Self::Remote { code, message } => match code.as_str() {
+                "no_active_window" => AdapterError::new(
+                    ErrorCode::WindowNotFound,
+                    "No active Android window is available",
+                )
+                .with_platform_detail(message),
+                "app_not_found" => {
+                    AdapterError::new(ErrorCode::AppNotFound, "The application was not found")
+                        .with_platform_detail(message)
+                }
+                "service_unavailable" => AdapterError::new(
+                    ErrorCode::PermDenied,
+                    "Android accessibility bridge is not running",
+                )
+                .with_suggestion(
+                    "Enable the agent-desktop bridge AccessibilityService in Android Settings",
+                )
+                .with_platform_detail(message),
+                "not_implemented" => AdapterError::new(
+                    ErrorCode::PlatformNotSupported,
+                    "The bridge does not implement this operation",
+                )
+                .with_platform_detail(message),
+                _ => AdapterError::new(ErrorCode::Internal, "Bridge call failed")
+                    .with_platform_detail(format!("{code}: {message}")),
+            },
         }
     }
 }

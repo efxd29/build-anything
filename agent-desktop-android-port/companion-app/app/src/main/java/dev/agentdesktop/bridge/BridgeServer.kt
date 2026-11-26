@@ -1,25 +1,36 @@
 package dev.agentdesktop.bridge
 
+import android.accessibilityservice.AccessibilityService
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.LocalServerSocket
 import android.net.LocalSocket
 import android.os.Build
 import android.provider.Settings
+import android.util.Base64
+import android.view.Display
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
- * Minimal bridge server: newline-delimited JSON over an abstract-namespace
- * local socket, one sequential connection at a time.
+ * Bridge server: newline-delimited JSON over an abstract-namespace local
+ * socket, one sequential connection at a time.
  *
  * The first request on a connection must be `hello`; when a token file
- * exists in the app's private storage its `token` must match, otherwise the
- * connection is rejected. `hello` and `ping` both answer with the status
- * object the Rust client's permission report consumes. Every other method
- * currently answers `not_implemented` and lands in later phases.
+ * exists in the app's private storage its `token` must match, otherwise
+ * the connection is rejected. Methods: `ping` (status), `get_tree`,
+ * `act`, `launch_app`, `list_apps`, `screenshot`. Actions are performed
+ * only after the request's capture proof re-matches exactly one live
+ * node, in the same request.
  */
 object BridgeServer {
 
@@ -32,9 +43,13 @@ object BridgeServer {
     private var worker: Thread? = null
     private var appContext: Context? = null
 
-    fun start(service: AgentAccessibilityService) {
+    @Volatile
+    private var service: AgentAccessibilityService? = null
+
+    fun start(accessibilityService: AgentAccessibilityService) {
+        service = accessibilityService
+        appContext = accessibilityService.applicationContext
         if (running) return
-        appContext = service.applicationContext
         running = true
         worker = Thread({ acceptLoop() }, "agent-desktop-bridge").apply { isDaemon = true }
         worker?.start()
@@ -42,6 +57,7 @@ object BridgeServer {
 
     fun stop() {
         running = false
+        service = null
         try {
             serverSocket?.close()
         } catch (ignored: Exception) {
@@ -49,6 +65,8 @@ object BridgeServer {
         serverSocket = null
         worker = null
     }
+
+    private class BridgeFailure(val code: String, message: String) : Exception(message)
 
     private fun acceptLoop() {
         try {
@@ -98,13 +116,7 @@ object BridgeServer {
                     writeLine(writer, okResponse(id, statusJson()))
                     continue
                 }
-                when (method) {
-                    "ping" -> writeLine(writer, okResponse(id, statusJson()))
-                    else -> writeLine(
-                        writer,
-                        errorResponse(id, "not_implemented", "method $method is not implemented yet")
-                    )
-                }
+                writeLine(writer, dispatch(id, method, request.optJSONObject("params") ?: JSONObject()))
             }
         } catch (ignored: Exception) {
         } finally {
@@ -113,6 +125,193 @@ object BridgeServer {
             } catch (ignored: Exception) {
             }
         }
+    }
+
+    private fun dispatch(id: Long, method: String, params: JSONObject): String {
+        return try {
+            when (method) {
+                "ping" -> okResponse(id, statusJson())
+                "get_tree" -> okResponse(id, getTreeResult())
+                "act" -> okResponse(id, actResult(params))
+                "launch_app" -> okResponse(id, launchResult(params))
+                "list_apps" -> okResponse(id, listAppsResult())
+                "screenshot" -> okResponse(id, screenshotResult())
+                else -> errorResponse(id, "not_implemented", "method $method is not implemented")
+            }
+        } catch (failure: BridgeFailure) {
+            errorResponse(id, failure.code, failure.message ?: failure.code)
+        } catch (error: Exception) {
+            errorResponse(id, "internal", error.message ?: "bridge call failed")
+        }
+    }
+
+    private fun requireService(): AgentAccessibilityService {
+        return service ?: throw BridgeFailure(
+            "service_unavailable",
+            "the accessibility service is not connected"
+        )
+    }
+
+    private fun getTreeResult(): JSONObject {
+        val active = requireService()
+        val root = active.rootInActiveWindow ?: throw BridgeFailure(
+            "no_active_window",
+            "no active window is available"
+        )
+        try {
+            return BridgeTree.serialize(root)
+        } finally {
+            root.recycle()
+        }
+    }
+
+    private fun actResult(params: JSONObject): JSONObject {
+        val active = requireService()
+        val proofJson = params.optJSONObject("proof")
+            ?: throw BridgeFailure("invalid_args", "act requires a proof object")
+        val proof = BridgeTree.Proof(
+            role = proofJson.optString("role", ""),
+            className = proofJson.optString("class", ""),
+            viewId = if (proofJson.isNull("view_id")) null else proofJson.optString("view_id"),
+            name = if (proofJson.isNull("name")) null else proofJson.optString("name"),
+            description = if (proofJson.isNull("description")) null else proofJson.optString("description")
+        )
+        val action = params.optString("action", "")
+        val arguments = params.optJSONObject("arguments") ?: JSONObject()
+        val root = active.rootInActiveWindow ?: throw BridgeFailure(
+            "no_active_window",
+            "no active window is available"
+        )
+        try {
+            val matches = mutableListOf<android.view.accessibility.AccessibilityNodeInfo>()
+            BridgeTree.collectMatches(root, proof, matches, true)
+            if (matches.size != 1) {
+                for (match in matches) {
+                    if (match !== root) {
+                        match.recycle()
+                    }
+                }
+                return JSONObject()
+                    .put("matched", matches.size)
+                    .put("performed", false)
+            }
+            val node = matches[0]
+            val performed = if (action == "scroll_into_view") {
+                BridgeTree.scrollIntoView(active, node, proof)
+            } else {
+                BridgeTree.perform(active, node, action, arguments)
+            }
+            if (node !== root) {
+                node.recycle()
+            }
+            return JSONObject()
+                .put("matched", 1)
+                .put("performed", performed)
+        } finally {
+            root.recycle()
+        }
+    }
+
+    private fun launchResult(params: JSONObject): JSONObject {
+        val packageName = params.optString("package", "")
+        if (packageName.isEmpty()) {
+            throw BridgeFailure("invalid_args", "launch_app requires a package name")
+        }
+        val context = appContext ?: throw BridgeFailure(
+            "service_unavailable",
+            "the bridge has no application context"
+        )
+        val intent = context.packageManager.getLaunchIntentForPackage(packageName)
+            ?: throw BridgeFailure("app_not_found", "no launchable activity for $packageName")
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
+        return JSONObject()
+            .put("launched", true)
+            .put("package", packageName)
+    }
+
+    private fun listAppsResult(): JSONObject {
+        val context = appContext ?: throw BridgeFailure(
+            "service_unavailable",
+            "the bridge has no application context"
+        )
+        val packageManager = context.packageManager
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val resolved = packageManager.queryIntentActivities(intent, PackageManager.MATCH_ALL)
+        val apps = JSONArray()
+        val seen = mutableSetOf<String>()
+        val entries = resolved
+            .map {
+                val pkg = it.activityInfo.packageName
+                val label = it.loadLabel(packageManager).toString()
+                pkg to label
+            }
+            .filter { seen.add(it.first) }
+            .sortedBy { it.second.lowercase() }
+        for ((pkg, label) in entries) {
+            apps.put(JSONObject().put("package", pkg).put("label", label))
+        }
+        return JSONObject().put("apps", apps)
+    }
+
+    private fun screenshotResult(): JSONObject {
+        val active = requireService()
+        val latch = CountDownLatch(1)
+        var png: ByteArray? = null
+        var width = 0
+        var height = 0
+        var failure: String? = null
+        active.takeScreenshot(
+            Display.DEFAULT_DISPLAY,
+            active.mainExecutor,
+            object : AccessibilityService.TakeScreenshotCallback {
+                override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                    try {
+                        val wrapped = Bitmap.wrapHardwareBuffer(
+                            result.hardwareBuffer,
+                            result.colorSpace
+                        )
+                        if (wrapped == null) {
+                            failure = "screenshot hardware buffer could not be wrapped"
+                        } else {
+                            val copy = wrapped.copy(Bitmap.Config.ARGB_8888, false)
+                            wrapped.recycle()
+                            if (copy == null) {
+                                failure = "screenshot bitmap could not be copied"
+                            } else {
+                                val stream = ByteArrayOutputStream()
+                                copy.compress(Bitmap.CompressFormat.PNG, 100, stream)
+                                png = stream.toByteArray()
+                                width = copy.width
+                                height = copy.height
+                                copy.recycle()
+                            }
+                        }
+                    } catch (error: Exception) {
+                        failure = error.message ?: "screenshot encoding failed"
+                    } finally {
+                        result.hardwareBuffer.close()
+                        latch.countDown()
+                    }
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    failure = "takeScreenshot failed with error $errorCode"
+                    latch.countDown()
+                }
+            }
+        )
+        if (!latch.await(10, TimeUnit.SECONDS)) {
+            throw BridgeFailure("timeout", "takeScreenshot did not answer in time")
+        }
+        val bytes = png ?: throw BridgeFailure(
+            "screenshot_failed",
+            failure ?: "screenshot failed"
+        )
+        return JSONObject()
+            .put("png_base64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+            .put("width", width)
+            .put("height", height)
     }
 
     private fun statusJson(): JSONObject {

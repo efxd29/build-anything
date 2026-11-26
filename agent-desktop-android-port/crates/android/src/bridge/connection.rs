@@ -78,13 +78,14 @@ impl BridgeConnection {
         if response.ok {
             return Ok(response.result.unwrap_or(Value::Null));
         }
-        let failure = response.error;
-        match failure.as_ref().map(|failure| failure.code.as_str()) {
-            Some("token_rejected") => Err(BridgeError::TokenRejected),
-            _ => Err(BridgeError::Protocol(
-                failure
-                    .map(|failure| format!("{}: {}", failure.code, failure.message))
-                    .unwrap_or_else(|| "bridge returned an error without detail".to_owned()),
+        match response.error {
+            Some(failure) if failure.code == "token_rejected" => Err(BridgeError::TokenRejected),
+            Some(failure) => Err(BridgeError::Remote {
+                code: failure.code,
+                message: failure.message,
+            }),
+            None => Err(BridgeError::Protocol(
+                "bridge returned an error without detail".to_owned(),
             )),
         }
     }

@@ -1,0 +1,54 @@
+name: agent-desktop-android-port
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "agent-desktop-android-port/**"
+      - ".github/workflows/agent-desktop-android-port.yml"
+
+jobs:
+  android-port-rust-check:
+    name: agent-desktop-android-port rust check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-desktop-android-port
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89.0"
+          targets: aarch64-linux-android
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK
+        run: sdkmanager "ndk;27.2.12479018"
+      - name: Check the Android adapter for the Android target
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang
+          CC_aarch64_linux_android: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang
+        run: cargo check -p agent-desktop-android --target aarch64-linux-android
+
+  android-port-apk:
+    name: agent-desktop-android-port companion APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK platform 35
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+      - name: Build the companion bridge app (debug)
+        run: gradle -p agent-desktop-android-port/companion-app assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-desktop-bridge-debug-apk
+          path: agent-desktop-android-port/companion-app/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

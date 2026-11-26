@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Port skeleton manifest. Deliberately NO android.permission.INTERNET:
-     the bridge is a same-device local socket only (BLUEPRINT.md section 2). -->
+<!-- The bridge is same-device only: an abstract-namespace local socket plus
+     a TCP listener bound to 127.0.0.1 (BLUEPRINT.md section 2). INTERNET is
+     declared solely because Android requires it to create any socket,
+     including a loopback one; nothing connects off-device. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <uses-permission android:name="android.permission.INTERNET" />
     <!-- Package visibility for list-apps / launch on API 30+. Narrow <queries> may
          replace this before any distribution; sideloaded MVP uses the broad query. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />

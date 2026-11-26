@@ -1,6 +1,8 @@
 //! Bridge client to the companion APK, replacing the D-Bus layer of the
-//! Linux adapter: a lazily connected, reconnecting client for the abstract
-//! Unix socket the bridge app serves, speaking newline-delimited JSON.
+//! Linux adapter: a lazily connected, reconnecting client for the local
+//! sockets the bridge app serves (the abstract Unix socket first, a
+//! loopback TCP fallback when SELinux denies the abstract connect),
+//! speaking newline-delimited JSON.
 
 mod connection;
 mod errors;

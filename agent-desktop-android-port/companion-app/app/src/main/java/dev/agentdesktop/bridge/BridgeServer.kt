@@ -16,14 +16,23 @@ import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.InputStream
 import java.io.InputStreamReader
+import java.io.OutputStream
 import java.io.OutputStreamWriter
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * Bridge server: newline-delimited JSON over an abstract-namespace local
- * socket, one sequential connection at a time.
+ * Bridge server: newline-delimited JSON over local sockets, one
+ * sequential connection at a time per listener. The primary listener is
+ * the abstract-namespace local socket; a second listener on TCP
+ * loopback (127.0.0.1) serves the same protocol for clients that
+ * SELinux keeps from connecting to another app's abstract socket.
+ * Both listeners share one connection handler.
  *
  * The first request on a connection must be `hello`; when a token file
  * exists in the app's private storage its `token` must match, otherwise
@@ -35,12 +44,16 @@ import java.util.concurrent.TimeUnit
 object BridgeServer {
 
     const val SOCKET_NAME = "agent-desktop-bridge"
+    const val TCP_PORT = 39271
+    private const val TCP_HOST = "127.0.0.1"
     private const val TOKEN_FILE = "bridge-token.txt"
 
     @Volatile
     private var running = false
     private var serverSocket: LocalServerSocket? = null
     private var worker: Thread? = null
+    private var tcpServerSocket: ServerSocket? = null
+    private var tcpWorker: Thread? = null
     private var appContext: Context? = null
 
     @Volatile
@@ -53,6 +66,8 @@ object BridgeServer {
         running = true
         worker = Thread({ acceptLoop() }, "agent-desktop-bridge").apply { isDaemon = true }
         worker?.start()
+        tcpWorker = Thread({ tcpAcceptLoop() }, "agent-desktop-bridge-tcp").apply { isDaemon = true }
+        tcpWorker?.start()
     }
 
     fun stop() {
@@ -64,6 +79,12 @@ object BridgeServer {
         }
         serverSocket = null
         worker = null
+        try {
+            tcpServerSocket?.close()
+        } catch (ignored: Exception) {
+        }
+        tcpServerSocket = null
+        tcpWorker = null
     }
 
     private class BridgeFailure(val code: String, message: String) : Exception(message)
@@ -85,10 +106,48 @@ object BridgeServer {
         }
     }
 
+    private fun tcpAcceptLoop() {
+        try {
+            val server = ServerSocket(TCP_PORT, 50, InetAddress.getByName(TCP_HOST))
+            tcpServerSocket = server
+            while (running) {
+                val socket = try {
+                    server.accept()
+                } catch (error: Exception) {
+                    break
+                }
+                handleConnection(socket)
+            }
+        } catch (ignored: Exception) {
+        }
+    }
+
     private fun handleConnection(socket: LocalSocket) {
         try {
-            val reader = BufferedReader(InputStreamReader(socket.inputStream, Charsets.UTF_8))
-            val writer = OutputStreamWriter(socket.outputStream, Charsets.UTF_8)
+            handleStreams(socket.inputStream, socket.outputStream)
+        } finally {
+            try {
+                socket.close()
+            } catch (ignored: Exception) {
+            }
+        }
+    }
+
+    private fun handleConnection(socket: Socket) {
+        try {
+            handleStreams(socket.inputStream, socket.outputStream)
+        } finally {
+            try {
+                socket.close()
+            } catch (ignored: Exception) {
+            }
+        }
+    }
+
+    private fun handleStreams(input: InputStream, output: OutputStream) {
+        try {
+            val reader = BufferedReader(InputStreamReader(input, Charsets.UTF_8))
+            val writer = OutputStreamWriter(output, Charsets.UTF_8)
             var greeted = false
             while (running) {
                 val line = reader.readLine() ?: break
@@ -119,11 +178,6 @@ object BridgeServer {
                 writeLine(writer, dispatch(id, method, request.optJSONObject("params") ?: JSONObject()))
             }
         } catch (ignored: Exception) {
-        } finally {
-            try {
-                socket.close()
-            } catch (ignored: Exception) {
-            }
         }
     }
 

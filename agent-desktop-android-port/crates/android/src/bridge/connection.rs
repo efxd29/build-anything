@@ -1,6 +1,12 @@
-//! One blocking connection to the bridge app over an abstract Unix socket.
+//! One blocking connection to the bridge app. The abstract Unix socket
+//! is tried first; when its connect fails (for example when SELinux
+//! denies a cross-app abstract-socket connect), the same protocol runs
+//! over a loopback TCP connection instead. The fallback happens at
+//! connect time, before any protocol message is sent, so a failed
+//! abstract connect never delivers a request.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::os::fd::FromRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
@@ -11,26 +17,26 @@ use super::errors::BridgeError;
 use super::protocol::{BridgeRequest, BridgeResponse};
 
 pub const BRIDGE_SOCKET_NAME: &str = "agent-desktop-bridge";
+pub const BRIDGE_TCP_PORT: u16 = 39271;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
+type BridgeReader = BufReader<Box<dyn Read + Send>>;
+type BridgeWriter = Box<dyn Write + Send>;
+
 pub struct BridgeConnection {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    reader: BridgeReader,
+    writer: BridgeWriter,
     next_id: u64,
 }
 
 impl BridgeConnection {
     pub fn connect(timeout: Duration) -> Result<Self, BridgeError> {
-        let stream = connect_abstract(BRIDGE_SOCKET_NAME)?;
-        stream
-            .set_read_timeout(Some(timeout))
-            .map_err(BridgeError::Io)?;
-        stream
-            .set_write_timeout(Some(timeout))
-            .map_err(BridgeError::Io)?;
-        let writer = stream.try_clone().map_err(BridgeError::Io)?;
+        let (reader, writer) = match connect_abstract(BRIDGE_SOCKET_NAME) {
+            Ok(stream) => unix_halves(stream, timeout),
+            Err(_) => tcp_halves(timeout),
+        }?;
         Ok(Self {
-            reader: BufReader::new(stream),
+            reader,
             writer,
             next_id: 0,
         })
@@ -89,6 +95,33 @@ impl BridgeConnection {
             )),
         }
     }
+}
+
+fn unix_halves(
+    stream: UnixStream,
+    timeout: Duration,
+) -> Result<(BridgeReader, BridgeWriter), BridgeError> {
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(BridgeError::Io)?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(BridgeError::Io)?;
+    let writer = stream.try_clone().map_err(BridgeError::Io)?;
+    Ok((BufReader::new(Box::new(stream)), Box::new(writer)))
+}
+
+fn tcp_halves(timeout: Duration) -> Result<(BridgeReader, BridgeWriter), BridgeError> {
+    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), BRIDGE_TCP_PORT);
+    let stream = TcpStream::connect_timeout(&address, timeout).map_err(map_io)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(BridgeError::Io)?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(BridgeError::Io)?;
+    let writer = stream.try_clone().map_err(BridgeError::Io)?;
+    Ok((BufReader::new(Box::new(stream)), Box::new(writer)))
 }
 
 fn map_io(error: std::io::Error) -> BridgeError {
